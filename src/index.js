@@ -18,9 +18,11 @@ if (!clientId) {
 const presenceOnly = process.argv.includes("--presence-only");
 const codexArgs = process.argv.slice(2).filter((arg) => arg !== "--presence-only");
 const startedAt = new Date();
-const rpc = new RPC.Client({ transport: "ipc" });
+let rpc;
 let shuttingDown = false;
 let presenceTimer;
+let reconnectTimer;
+let connecting = false;
 let lastActivityText;
 
 function formatTokens(tokens) {
@@ -98,6 +100,8 @@ async function updatePresence() {
   const workingDirectory = session.workingDirectory || process.cwd();
   const activityText = `${workingDirectory}|${session.tokens ?? "waiting"}`;
 
+  if (!rpc) throw new Error("Discord RPC is not connected");
+
   await rpc.setActivity({
     details: `Working in ${path.basename(workingDirectory)}`,
     state: formatTokens(session.tokens),
@@ -125,31 +129,78 @@ function codexProcess() {
 }
 
 async function connectPresence() {
-  rpc.on("ready", async () => {
-    await updatePresence();
-    presenceTimer = setInterval(() => {
-      void updatePresence().catch(() => {});
-    }, 15_000);
+  if (shuttingDown || connecting) return;
+  connecting = true;
+  const client = new RPC.Client({ transport: "ipc" });
+  rpc = client;
 
-    console.log("Discord Rich Presence connected.");
+  client.once("ready", async () => {
+    connecting = false;
+    clearInterval(presenceTimer);
+
+    try {
+      await updatePresence();
+      console.log("Discord Rich Presence connected.");
+    } catch (error) {
+      console.warn(`Initial presence update failed: ${error.message}`);
+      scheduleReconnect();
+      return;
+    }
+
+    presenceTimer = setInterval(() => {
+      void updatePresence().catch((error) => {
+        console.warn(`Presence update failed: ${error.message}`);
+        scheduleReconnect();
+      });
+    }, 15_000);
+  });
+
+  client.once("disconnected", () => {
+    connecting = false;
+    console.warn("Discord disconnected; reconnecting…");
+    scheduleReconnect();
+  });
+
+  client.on("error", (error) => {
+    console.warn(`Discord RPC error: ${error.message}`);
   });
 
   try {
-    await rpc.login({ clientId });
+    await client.login({ clientId });
   } catch (error) {
+    connecting = false;
     console.warn(`Discord Rich Presence unavailable: ${error.message}`);
-    console.warn("Codex will continue without presence. Is the Discord desktop app running?");
+    scheduleReconnect();
   }
+}
+
+function scheduleReconnect() {
+  if (shuttingDown || reconnectTimer) return;
+  clearInterval(presenceTimer);
+  presenceTimer = undefined;
+
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = undefined;
+    void connectPresence();
+  }, 5_000);
+
+  try {
+    rpc?.destroy();
+  } catch {
+    // The IPC connection may already be gone.
+  }
+  rpc = undefined;
 }
 
 async function shutdown(exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   clearInterval(presenceTimer);
+  clearTimeout(reconnectTimer);
 
   try {
-    await rpc.clearActivity();
-    rpc.destroy();
+    await rpc?.clearActivity();
+    rpc?.destroy();
   } catch {
     // Discord may already be closed; there is nothing left to clean up.
   }
