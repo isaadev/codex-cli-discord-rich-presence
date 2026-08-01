@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import "dotenv/config";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -47,10 +47,51 @@ async function latestSessionFile() {
       files.map(async (file) => ({ file, stat: await fs.stat(file) }))
     );
 
-    return candidates.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs)[0]?.file;
+    candidates.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+
+    for (const candidate of candidates) {
+      try {
+        const handle = await fs.open(candidate.file, "r");
+        const buffer = Buffer.alloc(Math.min(candidate.stat.size, 64 * 1024));
+        await handle.read(buffer, 0, buffer.length, 0);
+        await handle.close();
+        const firstLine = buffer.toString("utf8").split("\n", 1)[0];
+        const metadata = JSON.parse(firstLine);
+
+        if (metadata.payload?.source === "cli") return candidate.file;
+      } catch {
+        // Ignore incomplete or non-session files and continue searching.
+      }
+    }
+
+    return undefined;
   } catch {
     return undefined;
   }
+}
+
+function commandOutput(command, args) {
+  return new Promise((resolve) => {
+    execFile(command, args, { windowsHide: true }, (error, stdout) => {
+      resolve(error ? "" : stdout);
+    });
+  });
+}
+
+async function hasRunningCodex() {
+  if (process.platform === "win32") {
+    const output = await commandOutput("tasklist.exe", [
+      "/fi",
+      "imagename eq codex.exe",
+      "/fo",
+      "csv",
+      "/nh"
+    ]);
+    return /^"codex\.exe"/im.test(output);
+  }
+
+  const output = await commandOutput("ps", ["-A", "-o", "comm="]);
+  return output.split("\n").some((name) => /(^|\/)codex$/.test(name.trim()));
 }
 
 async function readSessionActivity() {
@@ -96,6 +137,15 @@ async function readSessionActivity() {
 }
 
 async function updatePresence() {
+  if (!(await hasRunningCodex())) {
+    if (lastActivityText !== "inactive") {
+      await rpc?.clearActivity();
+      console.log("Presence cleared: no Codex CLI process is running.");
+      lastActivityText = "inactive";
+    }
+    return;
+  }
+
   const session = await readSessionActivity();
   const workingDirectory = session.workingDirectory || process.cwd();
   const activityText = `${workingDirectory}|${session.tokens ?? "waiting"}`;

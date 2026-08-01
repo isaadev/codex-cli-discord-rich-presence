@@ -40,7 +40,7 @@ To keep Rich Presence running independently and follow the newest Codex session:
 codex-rp --presence-only
 ```
 
-In presence-only mode, leave that process running while you use Codex from other terminals or integrations. The activity follows the most recently updated local Codex session.
+In presence-only mode, leave that process running while you use Codex from other terminals. The activity follows the most recently updated top-level Codex CLI session, ignores subagent session files, and clears when no `codex` process is running.
 
 Alternatively, set the application ID for your Windows user:
 
